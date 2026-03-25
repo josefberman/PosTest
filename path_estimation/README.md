@@ -20,7 +20,7 @@ python -m path_estimation \
 Outputs:
 
 - `metrics.json` — per-method scores (RMSE, MAE, Hausdorff, discrete Fréchet, DTW, length ratio, endpoint error, …).
-- `figures/<method>_path_enu.png` — ENU overlay (true vs estimated; optional observation overlays).
+- `figures/<method>_path_enu.png` — ENU overlay (true vs estimated; optional observation overlays; no uncertainty ellipses).
 
 ## Methods
 
@@ -29,9 +29,9 @@ Outputs:
 | `dijkstra` | Snap observations to OSM nodes; stitch shortest paths; uniform speed along polyline. |
 | `astar` | Same as Dijkstra with `networkx.astar_path` (heuristic). |
 | `hmm` | Viterbi–style map match over k-nearest nodes per observation. |
-| `kf` | 4D constant-velocity Kalman filter; GPS updates only. |
-| `ekf` | EKF with GPS + circle radius + cell radial cues. |
-| `ukf` | Unscented Kalman filter (GPS) via `filterpy`. |
+| `kf` | 4D constant-velocity Kalman filter; fused linear updates (GPS tight; circle/cell as weaker position cues). |
+| `ekf` | EKF with GPS + circle + cell geometry. |
+| `ukf` | Unscented Kalman filter via `filterpy`; fused measurement schedule. |
 | `particle` | Bootstrap particle filter with mixed likelihoods. |
 | `lstm` | LSTM on observation sequence; supervised fit on the same run. |
 | `transformer` | Small Transformer encoder. |
