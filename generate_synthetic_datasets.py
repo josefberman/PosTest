@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate synthetic trajectory datasets with asynchronous mixed-source observations.
+"""Generate a single synthetic trajectory dataset with asynchronous mixed-source observations.
 
 Local motion uses east/north meters anchored at a London reference; CSV columns
 include WGS84 ``*_lon`` / ``*_lat`` for mapping. Ground-truth routes follow
@@ -35,7 +35,8 @@ from plotting_utils import (
 class SourceCadence:
     """Sampling behavior for one observation source.
 
-    Use ``mode="bursts"`` for GPS and circular-uncertainty (few ~1Hz bursts, long gaps).
+    Use ``mode="bursts"`` for GPS and circular-uncertainty (~1 Hz bursts in each burst
+    window, long gaps between bursts; ``burst_count`` is set from simulation duration).
     Use ``mode="uniform_intervals"`` for cellular (inter-arrival uniform in [min, max]).
 
     Attributes:
@@ -312,19 +313,27 @@ def build_reference_timeline(duration_s: int, reference_hz: float) -> np.ndarray
     return np.arange(0.0, duration_s + 1e-9, step)
 
 
-def make_cadences(density: str) -> Dict[str, SourceCadence]:
-    """Return per-source cadence presets for a density profile.
+# OSM route scoring: prefer more corner-rich walks when using ``london_street_path``.
+DEFAULT_PATH_KIND = "complex"
 
-    Dense: three independent ~8s bursts at ~1Hz for GPS and circle; sparse: one burst each.
-    Cellular: inter-arrival uniform between 60s and 300s, spread across the full duration.
+# GPS / circle: scale burst count with duration (same density as the old fixed 3 bursts per 3600 s).
+_BURST_COUNT_PER_HOUR = 3.0
+
+
+def make_cadences(duration_s: int) -> Dict[str, SourceCadence]:
+    """Return per-source cadence (bursty GPS/circle, uniform-interval cellular).
+
+    GPS and circle: independent ~8 s bursts at ~1 Hz; the number of bursts scales with
+    ``duration_s`` (default density: three bursts per hour of simulation). Cellular: uniform 60–300 s
+    inter-arrival across the full duration (already scales with length).
 
     Args:
-        density: Sampling profile identifier (`dense` or `sparse`).
+        duration_s: Simulation horizon in seconds (determines burst_count for GPS/circle).
 
     Returns:
         Mapping from source type to cadence configuration.
     """
-    burst_count = 3 if density == "dense" else 1
+    burst_count = max(1, int(round(float(duration_s) * _BURST_COUNT_PER_HOUR / 3600.0)))
     burst_cfg = SourceCadence(
         mode="bursts",
         burst_count=burst_count,
@@ -800,7 +809,7 @@ def validate_events(df: pd.DataFrame) -> None:
 def true_positions_for_reference_times(
     t_ref: np.ndarray,
     rng: np.random.Generator,
-    path_kind: str,
+    path_kind: str = DEFAULT_PATH_KIND,
 ) -> np.ndarray:
     """Ground-truth positions (east/north meters): real London OSM walk or fallback polylines.
 
@@ -853,38 +862,32 @@ def make_towers() -> np.ndarray:
 
 def generate_dataset(
     rng: np.random.Generator,
-    dataset_id: str,
-    path_kind: str,
-    density: str,
-    duration_s: int,
     output_dir: Path,
+    duration_s: int,
+    dataset_id: str = "dataset",
 ) -> pd.DataFrame:
-    """Generate, validate, plot, and write one dataset variant.
+    """Generate, validate, plot, and write one dataset (observations + true path + figures).
 
     Writes ``*_observations.csv`` (mixed-source events) and ``*_true_path.csv``
     (ground truth at 1 Hz: ``timestamp_s``, ``true_x``, ``true_y``, ``lon``, ``lat``, metadata).
 
     Args:
         rng: Random number generator.
-        dataset_id: Output dataset identifier (for filenames and metadata).
-        path_kind: Path complexity kind (`simple` or `complex`).
-        density: Sampling density profile (`dense` or `sparse`).
+        output_dir: Directory where CSV and PNG files are written.
         duration_s: Total simulation duration in seconds.
-        output_dir: Directory where CSV/plot files are written.
+        dataset_id: Output prefix for filenames and ``dataset_id`` column.
 
     Returns:
         Observations DataFrame (same as written to ``*_observations.csv``).
     """
     reference_hz = 10.0
     t_ref = build_reference_timeline(duration_s, reference_hz)
-    true_xy_ref = true_positions_for_reference_times(t_ref, rng, path_kind)
+    true_xy_ref = true_positions_for_reference_times(t_ref, rng)
 
-    cadences = make_cadences(density)
+    cadences = make_cadences(duration_s)
     towers = make_towers()
     df = build_events(rng, t_ref, true_xy_ref, cadences, towers)
     df["dataset_id"] = dataset_id
-    df["path_complexity"] = path_kind
-    df["density"] = density
     df["reference_origin_lat"] = LONDON_REFERENCE_LAT_DEG
     df["reference_origin_lon"] = LONDON_REFERENCE_LON_DEG
 
@@ -907,8 +910,6 @@ def generate_dataset(
             "reference_origin_lat": LONDON_REFERENCE_LAT_DEG,
             "reference_origin_lon": LONDON_REFERENCE_LON_DEG,
             "dataset_id": dataset_id,
-            "path_complexity": path_kind,
-            "density": density,
         }
     )
     true_path_csv = output_dir / f"{dataset_id}_true_path.csv"
@@ -950,21 +951,17 @@ def generate_dataset(
 
 
 def main() -> None:
-    """Run CLI generation for all matrix variants.
-
-    Parses command-line arguments, generates all dataset variants, and writes
-    outputs to disk.
-    """
+    """CLI: generate a single trajectory dataset (observations + true path + plots)."""
     parser = argparse.ArgumentParser(
         description=(
-            "Generate synthetic trajectory datasets with asynchronous mixed-source "
-            "observations (gps, circle, cell_sector)."
+            "Generate one synthetic trajectory dataset with asynchronous mixed-source "
+            "observations (gps, circle, cell_sector) and a London OSM ground-truth path."
         ),
         epilog=(
             "Examples:\n"
             "  python generate_synthetic_datasets.py\n"
             "  python generate_synthetic_datasets.py --seed 7 --duration-s 1800\n"
-            "  python generate_synthetic_datasets.py --output-dir ./data/run_01"
+            "  python generate_synthetic_datasets.py --output-dir ./data --dataset-id run_01"
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
@@ -978,7 +975,7 @@ def main() -> None:
         "--duration-s",
         type=int,
         default=900,
-        help="Duration of each dataset in seconds. Default: %(default)s.",
+        help="Simulation duration in seconds. Default: %(default)s.",
     )
     parser.add_argument(
         "--output-dir",
@@ -986,34 +983,25 @@ def main() -> None:
         default=Path("data"),
         help="Output directory for generated CSV and PNG files. Default: %(default)s.",
     )
+    parser.add_argument(
+        "--dataset-id",
+        type=str,
+        default="dataset",
+        help="Prefix for output CSV/PNG filenames and dataset_id column. Default: %(default)s.",
+    )
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(args.seed)
 
-    matrix = [
-        ("S-D", "simple", "dense"),
-        ("S-S", "simple", "sparse"),
-        ("C-D", "complex", "dense"),
-        ("C-S", "complex", "sparse"),
-    ]
-
-    summaries = []
-    for dataset_id, path_kind, density in matrix:
-        df = generate_dataset(
-            rng=rng,
-            dataset_id=dataset_id,
-            path_kind=path_kind,
-            density=density,
-            duration_s=args.duration_s,
-            output_dir=args.output_dir,
-        )
-        counts = df["source_type"].value_counts().to_dict()
-        summaries.append((dataset_id, len(df), counts))
-
-    print("Generated datasets:")
-    for dataset_id, total, counts in summaries:
-        print(f"- {dataset_id}: {total} events | source_counts={counts}")
+    df = generate_dataset(
+        rng=rng,
+        output_dir=args.output_dir,
+        duration_s=args.duration_s,
+        dataset_id=args.dataset_id,
+    )
+    counts = df["source_type"].value_counts().to_dict()
+    print(f"Generated dataset '{args.dataset_id}': {len(df)} events | source_counts={counts}")
     print(f"Output folder: {args.output_dir.resolve()}")
 
 

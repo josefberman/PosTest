@@ -8,11 +8,19 @@ from typing import List, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.patches import Circle, Wedge
+
+from geo_reference import local_enu_meters_to_lon_lat
 
 try:
     from pyproj import Transformer
 except ImportError:  # pragma: no cover
     Transformer = None  # type: ignore
+
+COLOR_GPS = "#79c300"
+COLOR_UNCERTAINTY = "#61007d"
+COLOR_CELL_SECTOR = "#cd001a"
+TRUE_PATH_LW = 4.5
 
 
 def _lon_lat_to_web_mercator(
@@ -50,8 +58,48 @@ def _extent_with_padding(
     )
 
 
-def _try_add_basemap(ax: plt.Axes, *, alpha: float = 0.85) -> bool:
-    """Overlay OpenStreetMap tiles if ``contextily`` is available."""
+def _sector_ring_enu(
+    tx: float,
+    ty: float,
+    r_in: float,
+    r_out: float,
+    th0: float,
+    th1: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Closed polygon for an annulus sector in local ENU (0 rad = +x, CCW)."""
+    if r_out <= 0 or r_in < 0 or r_in >= r_out:
+        return np.array([]), np.array([])
+    if th1 < th0:
+        th1 = th1 + 2.0 * np.pi
+    n = max(8, int(48 * (th1 - th0) / (2 * np.pi)))
+    n = min(n, 96)
+    outer = np.linspace(th0, th1, n)
+    inner = np.linspace(th1, th0, n)
+    ox = tx + r_out * np.cos(outer)
+    oy = ty + r_out * np.sin(outer)
+    ix = tx + r_in * np.cos(inner)
+    iy = ty + r_in * np.sin(inner)
+    return np.concatenate([ox, ix]), np.concatenate([oy, iy])
+
+
+def _enu_to_mercator_xy(east_m: np.ndarray, north_m: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    lon, lat = local_enu_meters_to_lon_lat(
+        np.asarray(east_m, dtype=float),
+        np.asarray(north_m, dtype=float),
+    )
+    return _lon_lat_to_web_mercator(lon, lat)
+
+
+def _wedge_degrees(theta_start_rad: float, theta_end_rad: float) -> Tuple[float, float]:
+    t1 = float(np.degrees(theta_start_rad))
+    t2 = float(np.degrees(theta_end_rad))
+    if t2 < t1:
+        t2 += 360.0
+    return t1, t2
+
+
+def _try_add_basemap(ax: plt.Axes, *, alpha: float = 0.5) -> bool:
+    """Overlay OpenStreetMap tiles if ``contextily`` is available (semi-transparent)."""
     try:
         import contextily as ctx
     except ImportError:
@@ -77,7 +125,13 @@ def plot_true_path(df: pd.DataFrame, output_path: Path, show: bool = False) -> N
         show: If True, display the figure interactively.
     """
     fig, ax = plt.subplots(figsize=(9, 6))
-    ax.plot(df["true_x"], df["true_y"], color="black", linewidth=1.4, label="True path")
+    ax.plot(
+        df["true_x"],
+        df["true_y"],
+        color="black",
+        linewidth=TRUE_PATH_LW,
+        label="True path",
+    )
     ax.set_title("Ground Truth Path")
     ax.set_xlabel("x (m)")
     ax.set_ylabel("y (m)")
@@ -92,7 +146,7 @@ def plot_true_path(df: pd.DataFrame, output_path: Path, show: bool = False) -> N
 
 
 def plot_observations_only(df: pd.DataFrame, output_path: Path, show: bool = False) -> None:
-    """Plot only observed points by source type.
+    """Plot observations in local meters: GPS points, uncertainty disks, cell annulus sectors.
 
     Args:
         df: Dataset DataFrame containing source-specific observation columns.
@@ -105,18 +159,54 @@ def plot_observations_only(df: pd.DataFrame, output_path: Path, show: bool = Fal
     cir = df[df["source_type"] == "circle"]
     cel = df[df["source_type"] == "cell_sector"]
 
-    if not gps.empty:
-        ax.scatter(gps["gps_x"], gps["gps_y"], s=12, alpha=0.75, label="GPS")
+    for _, row in cir.iterrows():
+        r = float(row["circle_r"])
+        if r <= 0 or np.isnan(r):
+            continue
+        disk = Circle(
+            (float(row["circle_x"]), float(row["circle_y"])),
+            r,
+            facecolor=COLOR_UNCERTAINTY,
+            edgecolor="none",
+            alpha=0.5,
+            zorder=2,
+        )
+        ax.add_patch(disk)
     if not cir.empty:
-        ax.scatter(cir["circle_x"], cir["circle_y"], s=16, alpha=0.65, label="Circle center")
+        ax.scatter([], [], c=COLOR_UNCERTAINTY, alpha=0.5, s=40, label="Uncertainty radius")
+
+    for _, row in cel.iterrows():
+        tx, ty = float(row["cell_tower_x"]), float(row["cell_tower_y"])
+        r_in, r_out = float(row["cell_r_min"]), float(row["cell_r_max"])
+        th0, th1 = float(row["cell_theta_start"]), float(row["cell_theta_end"])
+        td1, td2 = _wedge_degrees(th0, th1)
+        w = r_out - r_in
+        if w <= 0 or r_out <= 0:
+            continue
+        wedge = Wedge(
+            (tx, ty),
+            r_out,
+            td1,
+            td2,
+            width=w,
+            facecolor=COLOR_CELL_SECTOR,
+            edgecolor="none",
+            alpha=0.5,
+            zorder=2,
+        )
+        ax.add_patch(wedge)
     if not cel.empty:
+        ax.scatter([], [], c=COLOR_CELL_SECTOR, alpha=0.5, s=40, label="Cell sector")
+
+    if not gps.empty:
         ax.scatter(
-            cel["cell_tower_x"],
-            cel["cell_tower_y"],
-            s=28,
-            alpha=0.85,
-            marker="^",
-            label="Cell tower (used)",
+            gps["gps_x"],
+            gps["gps_y"],
+            s=14,
+            alpha=1.0,
+            c=COLOR_GPS,
+            label="GPS",
+            zorder=4,
         )
 
     ax.set_title("Observations Only (No True Path)")
@@ -157,7 +247,14 @@ def plot_true_path_on_map(
     lat = track_df["lat"].to_numpy(dtype=float)
     xm, ym = _lon_lat_to_web_mercator(lon, lat)
     if show_path:
-        ax.plot(xm, ym, color="crimson", linewidth=2.0, label="True path", zorder=3)
+        ax.plot(
+            xm,
+            ym,
+            color="black",
+            linewidth=TRUE_PATH_LW,
+            label="True path",
+            zorder=3,
+        )
     xmin, xmax, ymin, ymax = _extent_with_padding(xm, ym)
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
@@ -187,16 +284,15 @@ def plot_observations_on_map(
     title: str = "Observations (London, OSM)",
     show: bool = False,
 ) -> None:
-    """Plot observation layers on a map (GPS / circle / synthetic cell tower), no path.
+    """Plot observation layers on a map: GPS points, uncertainty disks, annulus sectors.
 
     Args:
-        df: Event DataFrame with ``gps_lon``/``gps_lat``, ``circle_lon``/``circle_lat``,
-            ``cell_tower_lon``/``cell_tower_lat`` as applicable per ``source_type``.
+        df: Event DataFrame with local-meter and WGS84 columns per ``source_type``.
         output_path: Destination image path.
         show_basemap: If True, try OpenStreetMap tiles.
         show_gps: Layer toggle for GPS fixes.
-        show_circle: Layer toggle for circle centers.
-        show_cell_tower: Layer toggle for (synthetic) cell tower positions.
+        show_circle: Layer toggle for uncertainty radius disks.
+        show_cell_tower: Layer toggle for cell annulus-sector regions.
         title: Figure title.
         show: If True, display interactively.
     """
@@ -208,30 +304,65 @@ def plot_observations_on_map(
     cir = df[df["source_type"] == "circle"] if show_circle else pd.DataFrame()
     cel = df[df["source_type"] == "cell_sector"] if show_cell_tower else pd.DataFrame()
 
+    for _, row in cir.iterrows():
+        r = float(row["circle_r"])
+        if r <= 0 or np.isnan(r):
+            continue
+        cx, cy = float(row["circle_x"]), float(row["circle_y"])
+        ang = np.linspace(0.0, 2.0 * np.pi, 65)
+        px = cx + r * np.cos(ang)
+        py = cy + r * np.sin(ang)
+        xm, ym = _enu_to_mercator_xy(px, py)
+        ax.fill(
+            xm,
+            ym,
+            facecolor=COLOR_UNCERTAINTY,
+            edgecolor="none",
+            alpha=0.5,
+            zorder=4,
+        )
+        xs.append(xm)
+        ys.append(ym)
+    if not cir.empty:
+        ax.scatter([], [], c=COLOR_UNCERTAINTY, alpha=0.5, s=40, label="Uncertainty radius")
+
+    for _, row in cel.iterrows():
+        tx, ty = float(row["cell_tower_x"]), float(row["cell_tower_y"])
+        r_in, r_out = float(row["cell_r_min"]), float(row["cell_r_max"])
+        th0, th1 = float(row["cell_theta_start"]), float(row["cell_theta_end"])
+        px, py = _sector_ring_enu(tx, ty, r_in, r_out, th0, th1)
+        if px.size == 0:
+            continue
+        xm, ym = _enu_to_mercator_xy(px, py)
+        ax.fill(
+            xm,
+            ym,
+            facecolor=COLOR_CELL_SECTOR,
+            edgecolor="none",
+            alpha=0.5,
+            zorder=4,
+        )
+        xs.append(xm)
+        ys.append(ym)
+    if not cel.empty:
+        ax.scatter([], [], c=COLOR_CELL_SECTOR, alpha=0.5, s=40, label="Cell sector")
+
     if not gps.empty:
         gx, gy = _lon_lat_to_web_mercator(
             gps["gps_lon"].to_numpy(dtype=float),
             gps["gps_lat"].to_numpy(dtype=float),
         )
-        ax.scatter(gx, gy, s=14, alpha=0.85, c="tab:blue", label="GPS", zorder=4)
+        ax.scatter(
+            gx,
+            gy,
+            s=16,
+            alpha=1.0,
+            c=COLOR_GPS,
+            label="GPS",
+            zorder=5,
+        )
         xs.append(gx)
         ys.append(gy)
-    if not cir.empty:
-        cx, cy = _lon_lat_to_web_mercator(
-            cir["circle_lon"].to_numpy(dtype=float),
-            cir["circle_lat"].to_numpy(dtype=float),
-        )
-        ax.scatter(cx, cy, s=22, alpha=0.8, c="tab:orange", label="Circle center", zorder=4)
-        xs.append(cx)
-        ys.append(cy)
-    if not cel.empty:
-        tx, ty = _lon_lat_to_web_mercator(
-            cel["cell_tower_lon"].to_numpy(dtype=float),
-            cel["cell_tower_lat"].to_numpy(dtype=float),
-        )
-        ax.scatter(tx, ty, s=36, alpha=0.9, c="tab:green", marker="^", label="Cell tower (synth)", zorder=4)
-        xs.append(tx)
-        ys.append(ty)
 
     if xs:
         all_x = np.concatenate(xs)
@@ -278,8 +409,8 @@ def plot_map_with_layers(
         show_basemap: If True, try OpenStreetMap tiles.
         show_true_path: Layer toggle for the ground-truth polyline.
         show_gps: Layer toggle for GPS.
-        show_circle: Layer toggle for circle centers.
-        show_cell_tower: Layer toggle for synthetic cell towers.
+        show_circle: Layer toggle for uncertainty radius disks.
+        show_cell_tower: Layer toggle for cell annulus-sector regions.
         title: Figure title.
         show: If True, display interactively.
     """
@@ -291,7 +422,14 @@ def plot_map_with_layers(
         lon = track_df["lon"].to_numpy(dtype=float)
         lat = track_df["lat"].to_numpy(dtype=float)
         xm, ym = _lon_lat_to_web_mercator(lon, lat)
-        ax.plot(xm, ym, color="crimson", linewidth=2.0, label="True path", zorder=3)
+        ax.plot(
+            xm,
+            ym,
+            color="black",
+            linewidth=TRUE_PATH_LW,
+            label="True path",
+            zorder=3,
+        )
         xs.append(xm)
         ys.append(ym)
 
@@ -299,30 +437,65 @@ def plot_map_with_layers(
     cir = events_df[events_df["source_type"] == "circle"] if show_circle else pd.DataFrame()
     cel = events_df[events_df["source_type"] == "cell_sector"] if show_cell_tower else pd.DataFrame()
 
+    for _, row in cir.iterrows():
+        r = float(row["circle_r"])
+        if r <= 0 or np.isnan(r):
+            continue
+        cx, cy = float(row["circle_x"]), float(row["circle_y"])
+        ang = np.linspace(0.0, 2.0 * np.pi, 65)
+        px = cx + r * np.cos(ang)
+        py = cy + r * np.sin(ang)
+        xmg, ymg = _enu_to_mercator_xy(px, py)
+        ax.fill(
+            xmg,
+            ymg,
+            facecolor=COLOR_UNCERTAINTY,
+            edgecolor="none",
+            alpha=0.5,
+            zorder=4,
+        )
+        xs.append(xmg)
+        ys.append(ymg)
+    if not cir.empty:
+        ax.scatter([], [], c=COLOR_UNCERTAINTY, alpha=0.5, s=40, label="Uncertainty radius")
+
+    for _, row in cel.iterrows():
+        tx, ty = float(row["cell_tower_x"]), float(row["cell_tower_y"])
+        r_in, r_out = float(row["cell_r_min"]), float(row["cell_r_max"])
+        th0, th1 = float(row["cell_theta_start"]), float(row["cell_theta_end"])
+        px, py = _sector_ring_enu(tx, ty, r_in, r_out, th0, th1)
+        if px.size == 0:
+            continue
+        xmg, ymg = _enu_to_mercator_xy(px, py)
+        ax.fill(
+            xmg,
+            ymg,
+            facecolor=COLOR_CELL_SECTOR,
+            edgecolor="none",
+            alpha=0.5,
+            zorder=4,
+        )
+        xs.append(xmg)
+        ys.append(ymg)
+    if not cel.empty:
+        ax.scatter([], [], c=COLOR_CELL_SECTOR, alpha=0.5, s=40, label="Cell sector")
+
     if not gps.empty:
         gx, gy = _lon_lat_to_web_mercator(
             gps["gps_lon"].to_numpy(dtype=float),
             gps["gps_lat"].to_numpy(dtype=float),
         )
-        ax.scatter(gx, gy, s=14, alpha=0.85, c="tab:blue", label="GPS", zorder=4)
+        ax.scatter(
+            gx,
+            gy,
+            s=16,
+            alpha=1.0,
+            c=COLOR_GPS,
+            label="GPS",
+            zorder=5,
+        )
         xs.append(gx)
         ys.append(gy)
-    if not cir.empty:
-        cx, cy = _lon_lat_to_web_mercator(
-            cir["circle_lon"].to_numpy(dtype=float),
-            cir["circle_lat"].to_numpy(dtype=float),
-        )
-        ax.scatter(cx, cy, s=22, alpha=0.8, c="tab:orange", label="Circle center", zorder=4)
-        xs.append(cx)
-        ys.append(cy)
-    if not cel.empty:
-        tx, ty = _lon_lat_to_web_mercator(
-            cel["cell_tower_lon"].to_numpy(dtype=float),
-            cel["cell_tower_lat"].to_numpy(dtype=float),
-        )
-        ax.scatter(tx, ty, s=36, alpha=0.9, c="tab:green", marker="^", label="Cell tower (synth)", zorder=4)
-        xs.append(tx)
-        ys.append(ty)
 
     if xs:
         all_x = np.concatenate(xs)

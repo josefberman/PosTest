@@ -105,6 +105,15 @@ def _proj_xy_to_enu_columns(xs: np.ndarray, ys: np.ndarray, crs) -> np.ndarray:
     return np.column_stack((east, north))
 
 
+def load_walk_graph():
+    """Load or download the OSM walk graph used for synthetic paths (projected CRS).
+
+    Same graph as used internally for routing; safe to reuse for map-matching and
+    graph-based estimators.
+    """
+    return _load_walk_graph()
+
+
 def _load_walk_graph():
     """Load or download OSM walk graph; return projected MultiDiGraph."""
     import networkx as nx
@@ -129,40 +138,112 @@ def _load_walk_graph():
     return Gp
 
 
-def _find_route(
+def _longest_shortest_path_from_node(
+    G,
+    current: int,
+    rng: np.random.Generator,
+    path_kind: str,
+    remaining_m: float,
+) -> Optional[Tuple[List, float]]:
+    """Pick the best shortest-path segment from ``current`` using one Dijkstra sweep."""
+    import networkx as nx
+
+    # Radius scales with how much distance we still need; cap to keep each sweep bounded.
+    cutoff = min(35000.0, max(remaining_m * 1.35, 400.0))
+    try:
+        dist, paths = nx.single_source_dijkstra(
+            G, current, cutoff=cutoff, weight="length"
+        )
+    except Exception:
+        return None
+
+    scored: List[Tuple[List, float, int]] = []
+    for dest, plen in dist.items():
+        if dest == current or plen < 3.0:
+            continue
+        path = paths.get(dest)
+        if not path or len(path) < 2:
+            continue
+        scored.append((path, plen, len(path)))
+
+    if not scored:
+        return None
+
+    if path_kind == "complex":
+        scored.sort(key=lambda x: (-x[2], -x[1]))
+    else:
+        scored.sort(key=lambda x: (-x[1], -x[2]))
+
+    best_path, best_len, _ = scored[0]
+    return best_path, float(best_len)
+
+
+def _merge_route_polylines(
+    existing: np.ndarray,
+    seg: np.ndarray,
+) -> np.ndarray:
+    """Append ``seg`` to ``existing``, dropping a duplicate junction vertex if needed."""
+    if len(seg) < 2:
+        return existing
+    if len(existing) == 0:
+        return seg
+    if np.allclose(existing[-1], seg[0], atol=0.25):
+        return np.vstack([existing, seg[1:]])
+    return np.vstack([existing, seg])
+
+
+def _chain_street_polyline(
     G,
     target_length_m: float,
     rng: np.random.Generator,
     path_kind: str,
-) -> Optional[List]:
-    """Return a list of node IDs whose path length (m) is at least ``target_length_m``."""
+) -> Optional[np.ndarray]:
+    """Concatenate many shortest-path segments along real edges until length is reached.
+
+    A single shortest path inside a city bbox is usually only a few km; long
+    simulations need many chained segments so total arc length can match
+    ``duration * walk_speed`` without falling back to synthetic parametric paths.
+    """
     import networkx as nx
 
     nodes = list(G.nodes)
-    if len(nodes) < 2:
-        return None
+    current = int(rng.choice(nodes))
+    merged = np.zeros((0, 2), dtype=float)
+    # Worst case many short segments; keep upper bound generous for long targets.
+    max_segments = min(1000, max(120, int(target_length_m / 120.0) + 80))
 
-    candidates: List[Tuple[List, float, int]] = []
-    n_trial = 450
-    for _ in range(n_trial):
-        u, v = rng.choice(nodes, size=2, replace=False)
-        try:
-            path = nx.shortest_path(G, u, v, weight="length")
-        except nx.NetworkXNoPath:
+    for _ in range(max_segments):
+        c = _cumdist_xy(merged)
+        total = float(c[-1]) if len(c) else 0.0
+        if total >= target_length_m * 0.999:
+            break
+
+        remaining = max(0.0, target_length_m - total)
+        picked = _longest_shortest_path_from_node(
+            G, current, rng, path_kind, remaining_m=remaining
+        )
+        if picked is None:
+            break
+        path, _plen = picked
+        seg = _polyline_xy_from_route(G, path)
+        if len(seg) < 2:
+            current = path[-1]
             continue
-        plen = nx.shortest_path_length(G, u, v, weight="length")
-        if plen >= target_length_m * 0.88:
-            candidates.append((path, plen, len(path)))
+        merged = _merge_route_polylines(merged, seg)
+        current = path[-1]
 
-    if not candidates:
+        c2 = _cumdist_xy(merged)
+        if len(c2) and float(c2[-1]) - total < 0.5:
+            # no geometric progress; try another start once
+            current = int(rng.choice(nodes))
+
+    if len(merged) < 2:
         return None
-
-    if path_kind == "complex":
-        candidates.sort(key=lambda x: (-x[2], -x[1]))
-    else:
-        candidates.sort(key=lambda x: (x[2], -x[1]))
-
-    return candidates[0][0]
+    merged = _truncate_polyline(merged, target_length_m)
+    cfinal = _cumdist_xy(merged)
+    if float(cfinal[-1]) < min(50.0, target_length_m * 0.05):
+        return None
+    return merged
 
 
 def positions_enu_along_osm_walk(
@@ -193,21 +274,12 @@ def positions_enu_along_osm_walk(
         warnings.warn(f"Could not load OSM walk graph: {exc}", UserWarning)
         return None
 
-    route = _find_route(G, target_len_m, rng, path_kind)
-    if route is None:
+    xy_proj = _chain_street_polyline(G, target_len_m, rng, path_kind)
+    if xy_proj is None:
         warnings.warn(
-            "Could not find a long enough London street route; use synthetic path.",
+            "Could not build a long enough London street polyline; use synthetic path.",
             UserWarning,
         )
-        return None
-
-    xy_proj = _polyline_xy_from_route(G, route)
-    if len(xy_proj) < 2:
-        return None
-
-    xy_proj = _truncate_polyline(xy_proj, target_len_m)
-    cum = _cumdist_xy(xy_proj)
-    if cum[-1] < target_len_m * 0.5:
         return None
 
     crs = G.graph.get("crs")
