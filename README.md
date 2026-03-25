@@ -42,6 +42,8 @@ Positions are in **local ENU meters** (`east`, `north`) with a fixed reference (
 
 Loaders and alignment helpers live in `path_estimation/io.py`.
 
+**Tiny examples:** `path_estimation/sample_observations.csv` and `path_estimation/sample_true_path.csv` (paired 61 s run).
+
 ---
 
 ## Synthetic datasets

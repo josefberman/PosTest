@@ -2,6 +2,22 @@
 
 Reconstructs a trajectory (local ENU meters) from mixed asynchronous observations (`gps`, `circle`, `cell_sector`) and compares against `*_true_path.csv` (1 Hz).
 
+## Sample CSVs
+
+Paired toy data in this directory (61 s at 1 Hz, eight mixed observations):
+
+- `sample_true_path.csv`
+- `sample_observations.csv`
+
+```bash
+python -m path_estimation \
+  --observations path_estimation/sample_observations.csv \
+  --true-path path_estimation/sample_true_path.csv \
+  --output-dir path_estimation_runs/sample \
+  --methods kf \
+  --no-plots
+```
+
 ## CLI
 
 ```bash
