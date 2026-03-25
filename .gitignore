@@ -1,5 +1,5 @@
 cache/
 __pycache__/
 *.pyc
-data_3600/run_02*
-run_02/
+data_*/
+/run_*/
