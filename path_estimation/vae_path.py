@@ -67,14 +67,15 @@ def estimate_vae(
     T = len(times_ds)
     dim_pad = 12
     x_vec = torch.from_numpy(_pooled_features(obs_df, dim_pad)).unsqueeze(0)
-    y = torch.from_numpy(true_ds.astype(np.float32)).unsqueeze(0)
+    center = true_ds.mean(axis=0, keepdims=True).astype(np.float32)
+    y = torch.from_numpy((true_ds - center).astype(np.float32)).unsqueeze(0)
     if device is None:
         device = torch.device("cpu")
     x_vec = x_vec.to(device)
     y = y.to(device)
 
     model = PathVAE(in_dim=dim_pad, T=T, latent=latent).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    opt = torch.optim.Adam(model.parameters(), lr=5e-4)
     model.train()
     for _ in range(epochs):
         opt.zero_grad()
@@ -83,16 +84,20 @@ def estimate_vae(
         kl = -0.5 * torch.mean(1 + lv - mu.pow(2) - lv.exp())
         loss = rec + 1e-3 * kl
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
         opt.step()
     model.eval()
     with torch.no_grad():
         pred, mu, lv = model(x_vec)
-        est = pred.squeeze(0).cpu().numpy()
+        est = pred.squeeze(0).cpu().numpy() + center
         sig = float(torch.exp(0.5 * lv).mean().cpu())
-        sigma = np.full(T_full, sig, dtype=float)
+        sigma = np.full(T_full, max(sig, 1e-3), dtype=float)
 
     east = np.interp(times_s, times_ds, est[:, 0])
     north = np.interp(times_s, times_ds, est[:, 1])
+    if not np.all(np.isfinite(east)) or not np.all(np.isfinite(north)):
+        east = np.full(T_full, center[0, 0])
+        north = np.full(T_full, center[0, 1])
 
     return EstimationResult(
         times_s=times_s,

@@ -68,7 +68,8 @@ def estimate_gan(
     T = len(times_ds)
     dim_in = 12
     x_vec = torch.from_numpy(_pooled(obs_df, dim_in)).unsqueeze(0)
-    y = torch.from_numpy(true_ds.astype(np.float32)).unsqueeze(0)
+    center = true_ds.mean(axis=0, keepdims=True).astype(np.float32)
+    y = torch.from_numpy((true_ds - center).astype(np.float32)).unsqueeze(0)
     if device is None:
         device = torch.device("cpu")
     x_vec = x_vec.to(device)
@@ -103,13 +104,16 @@ def estimate_gan(
             z = torch.randn(1, noise_dim, device=device)
             samples.append(gen(x_vec, z).squeeze(0).cpu().numpy())
         arr = np.stack(samples, axis=0)
-        est = np.mean(arr, axis=0)
+        est = np.mean(arr, axis=0) + center
         spread = np.std(arr, axis=0)
-        std_e_ds = spread[:, 0]
-        std_n_ds = spread[:, 1]
+        std_e_ds = np.maximum(spread[:, 0], 1e-3)
+        std_n_ds = np.maximum(spread[:, 1], 1e-3)
 
     east = np.interp(times_s, times_ds, est[:, 0])
     north = np.interp(times_s, times_ds, est[:, 1])
+    if not np.all(np.isfinite(east)):
+        east = np.full(T_full, float(center[0, 0]))
+        north = np.full(T_full, float(center[0, 1]))
     std_e = np.interp(times_s, times_ds, std_e_ds)
     std_n = np.interp(times_s, times_ds, std_n_ds)
 

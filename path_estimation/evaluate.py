@@ -38,8 +38,6 @@ METHOD_REGISTRY: Dict[str, EstimatorFn] = {
     "ekf": estimate_ekf_fused,
     "ukf": estimate_ukf_fused,
     "particle": estimate_particle_filter,
-    "lstm": None,  # special-cased (torch)
-    "transformer": None,
     "gnn": estimate_gnn,
     "vae": estimate_vae,
     "gan": estimate_gan,
