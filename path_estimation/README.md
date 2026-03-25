@@ -20,7 +20,7 @@ python -m path_estimation \
 Outputs:
 
 - `metrics.json` — per-method scores (RMSE, MAE, Hausdorff, discrete Fréchet, DTW, length ratio, endpoint error, …).
-- `figures/<method>_path_enu.png` — ENU overlay (true vs estimated; optional σ ellipses for probabilistic outputs).
+- `figures/<method>_path_enu.png` — ENU overlay (true vs estimated; optional observation overlays).
 
 ## Methods
 
@@ -36,8 +36,6 @@ Outputs:
 | `lstm` | LSTM on observation sequence; supervised fit on the same run. |
 | `transformer` | Small Transformer encoder. |
 | `gnn` | GCN node classifier on OSM subgraph; guided snaps + stitch. |
-| `vae` | Conditional VAE on pooled observations → downsampled path + interpolation. |
-| `gan` | Conditional generator + discriminator; MC samples for spread. |
 
 ## Metrics (see `metrics.py`)
 

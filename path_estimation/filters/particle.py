@@ -1,4 +1,4 @@
-"""Bootstrap particle filter with mixed GPS / circle / cell likelihoods."""
+"""Bootstrap particle filter with soft Gaussian-like observation likelihoods."""
 
 from __future__ import annotations
 
@@ -11,28 +11,20 @@ from path_estimation.io import align_times_to_true, observation_enu_xy
 from path_estimation.types import EstimationResult
 
 
-def _angle_in_sector(b: float, s: float, e: float) -> bool:
-    twopi = 2.0 * math.pi
-    b = b % twopi
-    s = s % twopi
-    e = e % twopi
-    if s <= e:
-        return s <= b <= e
-    return b >= s or b <= e
-
-
 def estimate_particle_filter(
     obs_df: pd.DataFrame,
     true_df: pd.DataFrame,
     G,
     rng: np.random.Generator,
     *,
-    n_particles: int = 800,
-    sigma_vel: float = 0.8,
+    n_particles: int = 1200,
+    sigma_vel: float = 0.35,
     sigma_gps: float = 6.0,
-    sigma_circle: float = 10.0,
+    sigma_circle: float = 12.0,
+    sigma_cell_rad: float = 45.0,
+    sigma_cell_ang: float = 0.55,
 ) -> EstimationResult:
-    """Random-walk velocity particles; weight by observation likelihoods."""
+    """Random-walk velocity; soft Gaussian weights (no hard zero on cell sector)."""
     times_s, _ = align_times_to_true(true_df)
     events = obs_df.sort_values("timestamp_s").reset_index(drop=True)
     if events.empty:
@@ -40,12 +32,12 @@ def estimate_particle_filter(
 
     t_ev = events["timestamp_s"].to_numpy(float)
     P = max(50, n_particles)
-    x = rng.normal(0.0, 80.0, size=(P, 2))
+    x = rng.normal(0.0, 40.0, size=(P, 2))
     row0 = events.iloc[0]
     ox, oy = observation_enu_xy(row0)
     x[:, 0] += ox
     x[:, 1] += oy
-    v = rng.normal(0.0, 0.3, size=(P, 2))
+    v = rng.normal(0.0, 0.15, size=(P, 2))
     w = np.ones(P) / P
 
     traj_mu: list[np.ndarray] = []
@@ -67,7 +59,7 @@ def estimate_particle_filter(
         d = np.hypot(px - cx, py - cy)
         return np.exp(-0.5 * (d - r) ** 2 / (sigma_circle**2))
 
-    def weight_cell(
+    def weight_cell_soft(
         px: np.ndarray,
         py: np.ndarray,
         tx: float,
@@ -81,14 +73,26 @@ def estimate_particle_filter(
         dy = py - ty
         dist = np.hypot(dx, dy)
         ang = np.arctan2(dy, dx)
-        ok = (dist >= rmin) & (dist <= rmax)
-        for i in range(len(px)):
-            if not ok[i]:
-                ok[i] = False
-                continue
-            ok[i] = _angle_in_sector(float(ang[i]), th0, th1)
-        lik = np.where(ok, 1.0, 1e-4)
-        return lik
+        rmid = 0.5 * (rmin + rmax)
+        dr = dist - rmid
+        # Prefer distance inside [rmin, rmax]: soft hinge
+        if rmax > rmin:
+            half = 0.5 * (rmax - rmin)
+            dr_edge = np.maximum(np.abs(dr) - half, 0.0)
+        else:
+            dr_edge = np.abs(dist - rmid)
+        # Angular distance to nearest sector boundary (wrap-aware)
+        twopi = 2.0 * math.pi
+        thm = (th0 + th1) * 0.5
+        dang = ang - thm
+        dang = (dang + math.pi) % twopi - math.pi
+        span = abs(th1 - th0)
+        if span > math.pi:
+            span = twopi - span
+        dang = np.clip(np.abs(dang) - 0.5 * span, 0.0, math.pi)
+        lr = np.exp(-0.5 * (dr_edge / sigma_cell_rad) ** 2)
+        la = np.exp(-0.5 * (dang / sigma_cell_ang) ** 2)
+        return np.clip(lr * la, 1e-8, 1.0)
 
     t_prev = float(t_ev[0])
     traj_t.append(t_prev)
@@ -114,7 +118,7 @@ def estimate_particle_filter(
                 float(row["circle_r"]),
             )
         else:
-            w *= weight_cell(
+            w *= weight_cell_soft(
                 x[:, 0],
                 x[:, 1],
                 float(row["cell_tower_x"]),
@@ -125,11 +129,14 @@ def estimate_particle_filter(
                 float(row["cell_theta_end"]),
             )
 
-        w = np.maximum(w, 1e-200)
-        s = np.sum(w) + 1e-300
-        w /= s
+        w = np.maximum(w, 1e-300)
+        s = float(np.sum(w))
+        if s <= 0.0 or not np.isfinite(s):
+            w = np.ones(P) / P
+        else:
+            w /= s
         ess = 1.0 / (np.sum(w**2) + 1e-300)
-        if ess < P / 4.0:
+        if ess < P / 5.0:
             idx = rng.choice(P, size=P, p=w)
             x = x[idx]
             v = v[idx]

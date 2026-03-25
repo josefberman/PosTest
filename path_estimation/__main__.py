@@ -33,7 +33,7 @@ def main() -> None:
     p.add_argument(
         "--methods",
         type=str,
-        default="dijkstra,astar,hmm,kf,ekf,ukf,particle,lstm,transformer,gnn,vae,gan",
+        default="dijkstra,astar,hmm,kf,ekf,ukf,particle,lstm,transformer,gnn",
         help="Comma-separated method names.",
     )
     p.add_argument("--no-plots", action="store_true", help="Skip figure generation.")

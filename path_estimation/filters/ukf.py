@@ -1,6 +1,8 @@
-"""Unscented Kalman filter (constant-velocity) — GPS linear measurement via filterpy UKF."""
+"""Unscented Kalman filter (CV) with GPS + weak linear circle/cell position updates."""
 
 from __future__ import annotations
+
+import math
 
 import numpy as np
 import pandas as pd
@@ -17,16 +19,16 @@ def estimate_ukf_fused(
     G,
     rng: np.random.Generator,
     *,
-    sigma_acc: float = 0.4,
+    sigma_acc: float = 0.25,
     sigma_gps: float = 6.0,
+    sigma_circle_xy: float = 35.0,
+    sigma_cell_xy: float = 120.0,
 ) -> EstimationResult:
-    """UKF with GPS-only updates (same model as KF; UT for covariance propagation)."""
+    """UKF with same linear measurement model as fused KF; R varies by source."""
     times_s, _ = align_times_to_true(true_df)
     events = obs_df.sort_values("timestamp_s").reset_index(drop=True)
     if events.empty:
         raise ValueError("No observations.")
-    if events[events["source_type"] == "gps"].empty:
-        raise ValueError("UKF requires at least one GPS observation.")
 
     def fx(x: np.ndarray, dt: float) -> np.ndarray:
         F = np.array(
@@ -47,15 +49,31 @@ def estimate_ukf_fused(
         q = sigma_acc**2
         return np.diag([0.25 * q * dt**4] * 2 + [q * dt**2] * 2)
 
-    points = MerweScaledSigmaPoints(n=4, alpha=0.3, beta=2.0, kappa=0.0)
+    points = MerweScaledSigmaPoints(n=4, alpha=0.25, beta=2.0, kappa=0.0)
     ukf = UKF(dim_x=4, dim_z=2, dt=1.0, fx=fx, hx=hx, points=points)
     ukf.Q = Qm(1.0)
     ukf.R = np.eye(2) * (sigma_gps**2)
 
     t_ev = events["timestamp_s"].to_numpy(float)
-    g0 = events[events["source_type"] == "gps"].iloc[0]
-    ukf.x = np.array([float(g0["gps_x"]), float(g0["gps_y"]), 0.0, 0.0])
-    ukf.P = np.eye(4) * 100.0
+    row0 = events.iloc[0]
+    if row0["source_type"] == "gps":
+        ukf.x = np.array(
+            [float(row0["gps_x"]), float(row0["gps_y"]), 0.0, 0.0], dtype=float
+        )
+    elif row0["source_type"] == "circle":
+        ukf.x = np.array(
+            [float(row0["circle_x"]), float(row0["circle_y"]), 0.0, 0.0], dtype=float
+        )
+    else:
+        tx, ty = float(row0["cell_tower_x"]), float(row0["cell_tower_y"])
+        rm = 0.5 * (float(row0["cell_r_min"]) + float(row0["cell_r_max"]))
+        th = 0.5 * (
+            float(row0["cell_theta_start"]) + float(row0["cell_theta_end"])
+        )
+        ukf.x = np.array(
+            [tx + rm * math.cos(th), ty + rm * math.sin(th), 0.0, 0.0], dtype=float
+        )
+    ukf.P = np.eye(4) * 150.0
 
     traj_t: list[float] = []
     traj_xy: list[np.ndarray] = []
@@ -72,9 +90,23 @@ def estimate_ukf_fused(
         ukf.Q = Qm(dt)
         ukf.predict(dt=dt)
         row = events.iloc[k]
-        if row["source_type"] == "gps":
+        src = row["source_type"]
+        if src == "gps":
+            ukf.R = np.eye(2) * (sigma_gps**2)
             z = np.array([float(row["gps_x"]), float(row["gps_y"])], dtype=float)
-            ukf.update(z)
+        elif src == "circle":
+            ukf.R = np.eye(2) * (sigma_circle_xy**2)
+            z = np.array([float(row["circle_x"]), float(row["circle_y"])], dtype=float)
+        else:
+            ukf.R = np.eye(2) * (sigma_cell_xy**2)
+            tx, ty = float(row["cell_tower_x"]), float(row["cell_tower_y"])
+            rm = 0.5 * (float(row["cell_r_min"]) + float(row["cell_r_max"]))
+            th = 0.5 * (
+                float(row["cell_theta_start"]) + float(row["cell_theta_end"])
+            )
+            z = np.array([tx + rm * math.cos(th), ty + rm * math.sin(th)], dtype=float)
+        ukf.update(z)
+
         std_pair = np.sqrt(np.maximum(np.diag(ukf.P[:2, :2]), 0.0))
         traj_t.append(t)
         traj_xy.append(ukf.x[:2].copy())
@@ -95,5 +127,5 @@ def estimate_ukf_fused(
         north_m=north,
         std_east_m=std_e,
         std_north_m=std_n,
-        meta={"method": "ukf_gps_cv"},
+        meta={"method": "ukf_fused_linear"},
     )

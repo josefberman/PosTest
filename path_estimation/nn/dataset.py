@@ -9,7 +9,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from path_estimation.io import align_times_to_true
+from path_estimation.io import align_times_to_true, observation_enu_xy
 
 
 def build_feature_matrix(obs_df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
@@ -48,18 +48,62 @@ def interpolate_truth_to_events(
     t_ev: np.ndarray, true_df: pd.DataFrame
 ) -> np.ndarray:
     """True (east, north) linearly interpolated at event times."""
-    tt, xy = align_times_to_true(true_df)
+    tt, _ = align_times_to_true(true_df)
     ex = np.interp(t_ev, tt, true_df["true_x"].to_numpy(float))
     ny = np.interp(t_ev, tt, true_df["true_y"].to_numpy(float))
     return np.column_stack([ex, ny])
 
 
+def obs_proxy_xy(obs_df: pd.DataFrame) -> np.ndarray:
+    """Per-row observation proxy (same frame as true path)."""
+    obs_df = obs_df.sort_values("timestamp_s").reset_index(drop=True)
+    return np.array(
+        [observation_enu_xy(obs_df.iloc[i]) for i in range(len(obs_df))],
+        dtype=np.float32,
+    )
+
+
+def norm_scale_from_true(true_df: pd.DataFrame) -> Tuple[np.ndarray, float]:
+    """Mean (2,) and scalar scale for normalizing coordinates."""
+    tx = true_df["true_x"].to_numpy(float)
+    ty = true_df["true_y"].to_numpy(float)
+    mean = np.array([float(np.mean(tx)), float(np.mean(ty))], dtype=np.float32)
+    span = max(float(np.ptp(tx)), float(np.ptp(ty)), 80.0)
+    return mean, float(span)
+
+
+def normalize_xy(xy: np.ndarray, mean: np.ndarray, scale: float) -> np.ndarray:
+    return (xy - mean[None, :]) / max(scale, 1e-3)
+
+
+def denormalize_xy(xy: np.ndarray, mean: np.ndarray, scale: float) -> np.ndarray:
+    return xy * max(scale, 1e-3) + mean[None, :]
+
+
+def normalize_feature_matrix(
+    feats: np.ndarray, mean: np.ndarray, scale: float
+) -> np.ndarray:
+    """Normalize east/north slots in payload (cols 4–5 always x,y-ish)."""
+    out = feats.copy()
+    out[:, 4] = (out[:, 4] - mean[0]) / max(scale, 1e-3)
+    out[:, 5] = (out[:, 5] - mean[1]) / max(scale, 1e-3)
+    return out
+
+
 class TrajectoryDataset(Dataset):
-    """Single-sequence dataset: full observation sequence, targets at each event."""
+    """Observation sequence → residual targets (true − obs proxy), normalized."""
 
     def __init__(self, obs_df: pd.DataFrame, true_df: pd.DataFrame) -> None:
         self.feats, self.times = build_feature_matrix(obs_df)
-        self.targets = interpolate_truth_to_events(self.times, true_df)
+        self.mean_xy, self.scale = norm_scale_from_true(true_df)
+        self.feats = normalize_feature_matrix(self.feats, self.mean_xy, self.scale)
+        truth_ev = interpolate_truth_to_events(self.times, true_df)
+        proxy = obs_proxy_xy(obs_df)
+        residual = truth_ev - proxy
+        self.targets = normalize_xy(
+            residual.astype(np.float32), np.array([0.0, 0.0], dtype=np.float32), self.scale
+        )
+        self.proxy_ev = proxy
 
     def __len__(self) -> int:
         return max(1, len(self.feats))

@@ -8,7 +8,7 @@ from typing import Optional
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.patches import Circle, Ellipse, Wedge
+from matplotlib.patches import Circle, Wedge
 
 from path_estimation.types import EstimationResult
 from plotting_utils import (
@@ -22,21 +22,6 @@ from plotting_utils import (
 )
 
 
-def _cov_ellipse(
-    xy: np.ndarray, cov: np.ndarray, n_std: float = 2.0
-) -> tuple[float, float, float, float, float]:
-    """Return (width, height, angle_deg) for ``n_std`` ellipse from 2x2 cov at ``xy``."""
-    vals, vecs = np.linalg.eigh(cov)
-    vals = np.maximum(vals, 1e-12)
-    order = np.argsort(vals)[::-1]
-    vals = vals[order]
-    vecs = vecs[:, order]
-    width = 2 * n_std * np.sqrt(vals[0])
-    height = 2 * n_std * np.sqrt(vals[1])
-    angle = np.degrees(np.arctan2(vecs[1, 0], vecs[0, 0]))
-    return float(xy[0]), float(xy[1]), width, height, angle
-
-
 def plot_estimation_enu(
     true_df: pd.DataFrame,
     result: EstimationResult,
@@ -44,10 +29,9 @@ def plot_estimation_enu(
     output_path: Path,
     *,
     title: str,
-    sigma_multiplier: float = 2.0,
     show_observations: bool = True,
 ) -> None:
-    """Local ENU plot: true path, estimate, optional σ-bands, optional observations."""
+    """Local ENU plot: true path, estimate, optional observations (no σ-ellipses)."""
     fig, ax = plt.subplots(figsize=(10, 7))
     tx = true_df["true_x"].to_numpy(float)
     ty = true_df["true_y"].to_numpy(float)
@@ -55,50 +39,6 @@ def plot_estimation_enu(
     ex = result.east_m
     ny = result.north_m
     ax.plot(ex, ny, color="#0066cc", linewidth=2.2, label="Estimated", zorder=4)
-
-    if result.cov_enu is not None and len(result.cov_enu) > 0:
-        n = len(ex)
-        step = max(1, n // 80)
-        for i in range(0, n, step):
-            cx, cy, w, h, ang = _cov_ellipse(
-                np.array([ex[i], ny[i]]), result.cov_enu[i], n_std=sigma_multiplier
-            )
-            e = Ellipse(
-                (cx, cy),
-                width=w,
-                height=h,
-                angle=ang,
-                facecolor="none",
-                edgecolor="#6600aa",
-                alpha=0.35,
-                linewidth=0.6,
-                zorder=2,
-            )
-            ax.add_patch(e)
-
-    elif result.std_east_m is not None and result.std_north_m is not None:
-        se = np.asarray(result.std_east_m, dtype=float)
-        sn = np.asarray(result.std_north_m, dtype=float)
-        n = len(ex)
-        step = max(1, n // 120)
-        for i in range(0, n, step):
-            cov = np.diag([max(se[i], 1e-6) ** 2, max(sn[i], 1e-6) ** 2])
-            cx, cy, w, h, ang = _cov_ellipse(
-                np.array([ex[i], ny[i]]), cov, n_std=sigma_multiplier
-            )
-            ax.add_patch(
-                Ellipse(
-                    (cx, cy),
-                    width=w,
-                    height=h,
-                    angle=ang,
-                    facecolor="none",
-                    edgecolor="#0066cc",
-                    alpha=0.25,
-                    linewidth=0.5,
-                    zorder=2,
-                )
-            )
 
     if show_observations and obs_df is not None:
         gps = obs_df[obs_df["source_type"] == "gps"]

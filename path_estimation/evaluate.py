@@ -17,7 +17,6 @@ from path_estimation.filters import (
 )
 from path_estimation.graph_stitch import estimate_graph_stitch
 from path_estimation.gnn.estimate import estimate_gnn
-from path_estimation.gan_path import estimate_gan
 from path_estimation.graph_utils import get_projected_graph
 from path_estimation.hmm_map_match import estimate_hmm_map_match
 from path_estimation.io import align_times_to_true, load_observations_csv, load_true_path_csv
@@ -25,7 +24,6 @@ from path_estimation.metrics import compute_all_metrics
 from path_estimation.nn.lstm_model import predict_lstm_at_times, train_lstm
 from path_estimation.nn.transformer_model import predict_transformer_at_times, train_transformer
 from path_estimation.types import EstimationResult
-from path_estimation.vae_path import estimate_vae
 from path_estimation.viz import plot_estimation_enu, plot_estimation_map
 
 EstimatorFn = Callable[..., EstimationResult]
@@ -39,8 +37,6 @@ METHOD_REGISTRY: Dict[str, EstimatorFn] = {
     "ukf": estimate_ukf_fused,
     "particle": estimate_particle_filter,
     "gnn": estimate_gnn,
-    "vae": estimate_vae,
-    "gan": estimate_gan,
 }
 
 
@@ -52,8 +48,8 @@ def _estimate_lstm(
     device: Optional[str] = None,
 ) -> EstimationResult:
     dev = torch_device(device)
-    model = train_lstm(obs_df, true_df, dev, epochs=20)
-    times_s, xy = predict_lstm_at_times(model, obs_df, true_df, dev)
+    model, ds = train_lstm(obs_df, true_df, dev)
+    times_s, xy = predict_lstm_at_times(model, obs_df, true_df, dev, ds)
     return EstimationResult(
         times_s=times_s,
         east_m=xy[:, 0],
@@ -70,8 +66,8 @@ def _estimate_transformer(
     device: Optional[str] = None,
 ) -> EstimationResult:
     dev = torch_device(device)
-    model = train_transformer(obs_df, true_df, dev, epochs=25)
-    times_s, xy = predict_transformer_at_times(model, obs_df, true_df, dev)
+    model, ds = train_transformer(obs_df, true_df, dev)
+    times_s, xy = predict_transformer_at_times(model, obs_df, true_df, dev, ds)
     return EstimationResult(
         times_s=times_s,
         east_m=xy[:, 0],
@@ -124,10 +120,6 @@ def run_evaluation(
                 res = _estimate_transformer(obs_df, true_df, G, rng, device=device)
             elif name == "gnn":
                 res = estimate_gnn(obs_df, true_df, G, rng, device=dev)
-            elif name == "vae":
-                res = estimate_vae(obs_df, true_df, G, rng, device=dev)
-            elif name == "gan":
-                res = estimate_gan(obs_df, true_df, G, rng, device=dev)
             else:
                 fn = METHOD_REGISTRY.get(name)
                 if fn is None:

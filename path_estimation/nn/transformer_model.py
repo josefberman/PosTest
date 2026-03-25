@@ -1,4 +1,4 @@
-"""Lightweight Transformer encoder for per-event position regression."""
+"""Transformer encoder for per-event residual (normalized) -> absolute path."""
 
 from __future__ import annotations
 
@@ -24,12 +24,12 @@ class PositionalEncoding(nn.Module):
 
 
 class TransformerPath(nn.Module):
-    def __init__(self, input_dim: int = 12, d_model: int = 64, nhead: int = 4, nlayers: int = 2) -> None:
+    def __init__(self, input_dim: int = 12, d_model: int = 96, nhead: int = 4, nlayers: int = 2) -> None:
         super().__init__()
         self.embed = nn.Linear(input_dim, d_model)
         self.pos = PositionalEncoding(d_model)
         enc = nn.TransformerEncoderLayer(
-            d_model, nhead, dim_feedforward=128, batch_first=True, dropout=0.1
+            d_model, nhead, dim_feedforward=192, batch_first=True, dropout=0.15
         )
         self.enc = nn.TransformerEncoder(enc, num_layers=nlayers)
         self.head = nn.Linear(d_model, 2)
@@ -45,9 +45,9 @@ def train_transformer(
     obs_df,
     true_df,
     device: torch.device,
-    epochs: int = 10,
-    lr: float = 1e-3,
-) -> TransformerPath:
+    epochs: int = 80,
+    lr: float = 3e-3,
+):
     from path_estimation.nn.dataset import TrajectoryDataset
 
     ds = TrajectoryDataset(obs_df, true_df)
@@ -63,9 +63,10 @@ def train_transformer(
         pred = model(x)
         loss = loss_fn(pred, y)
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         opt.step()
     model.eval()
-    return model
+    return model, ds
 
 
 @torch.no_grad()
@@ -74,16 +75,18 @@ def predict_transformer_at_times(
     obs_df,
     true_df,
     device: torch.device,
+    ds,
 ) -> tuple[np.ndarray, np.ndarray]:
-    from path_estimation.nn.dataset import TrajectoryDataset
     from path_estimation.io import align_times_to_true
 
-    ds = TrajectoryDataset(obs_df, true_df)
     x, _ = ds[0]
     x = x.unsqueeze(0).to(device)
-    pred = model(x).squeeze(0).cpu().numpy()
+    pred_n = model(x).squeeze(0).cpu().numpy()
     t_ev = ds.times
+    scale = float(ds.scale)
+    residual = pred_n * scale
+    pred_abs = residual + ds.proxy_ev
     times_s, _ = align_times_to_true(true_df)
-    east = np.interp(times_s, t_ev, pred[:, 0])
-    north = np.interp(times_s, t_ev, pred[:, 1])
+    east = np.interp(times_s, t_ev, pred_abs[:, 0])
+    north = np.interp(times_s, t_ev, pred_abs[:, 1])
     return times_s, np.column_stack([east, north])

@@ -1,4 +1,4 @@
-"""LSTM regressor: observation sequence -> per-event (east, north)."""
+"""LSTM regressor: observation sequence -> per-event residual (normalized), then absolute path."""
 
 from __future__ import annotations
 
@@ -8,10 +8,10 @@ import torch.nn as nn
 
 
 class LSTMPath(nn.Module):
-    def __init__(self, input_dim: int = 12, hidden: int = 64, num_layers: int = 1) -> None:
+    def __init__(self, input_dim: int = 12, hidden: int = 96, num_layers: int = 2) -> None:
         super().__init__()
         self.lstm = nn.LSTM(
-            input_dim, hidden, num_layers, batch_first=True, dropout=0.0
+            input_dim, hidden, num_layers, batch_first=True, dropout=0.1
         )
         self.head = nn.Linear(hidden, 2)
 
@@ -24,9 +24,9 @@ def train_lstm(
     obs_df,
     true_df,
     device: torch.device,
-    epochs: int = 10,
-    lr: float = 1e-2,
-) -> LSTMPath:
+    epochs: int = 80,
+    lr: float = 3e-3,
+) -> tuple:
     from path_estimation.nn.dataset import TrajectoryDataset
 
     ds = TrajectoryDataset(obs_df, true_df)
@@ -42,9 +42,10 @@ def train_lstm(
         pred = model(x)
         loss = loss_fn(pred, y)
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         opt.step()
     model.eval()
-    return model
+    return model, ds
 
 
 @torch.no_grad()
@@ -53,17 +54,19 @@ def predict_lstm_at_times(
     obs_df,
     true_df,
     device: torch.device,
+    ds,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Interpolate per-event predictions to 1 Hz true timeline."""
-    from path_estimation.nn.dataset import TrajectoryDataset
     from path_estimation.io import align_times_to_true
 
-    ds = TrajectoryDataset(obs_df, true_df)
     x, _ = ds[0]
     x = x.unsqueeze(0).to(device)
-    pred = model(x).squeeze(0).cpu().numpy()
+    pred_n = model(x).squeeze(0).cpu().numpy()
     t_ev = ds.times
+    scale = float(ds.scale)
+    residual = pred_n * scale
+    pred_abs = residual + ds.proxy_ev
     times_s, _ = align_times_to_true(true_df)
-    east = np.interp(times_s, t_ev, pred[:, 0])
-    north = np.interp(times_s, t_ev, pred[:, 1])
+    east = np.interp(times_s, t_ev, pred_abs[:, 0])
+    north = np.interp(times_s, t_ev, pred_abs[:, 1])
     return times_s, np.column_stack([east, north])
