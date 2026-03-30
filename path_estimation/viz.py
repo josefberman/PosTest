@@ -30,12 +30,14 @@ def plot_estimation_enu(
     *,
     title: str,
     show_observations: bool = True,
+    show_true_path: bool = True,
 ) -> None:
     """Local ENU plot: true path, estimate, optional observations (no σ-ellipses)."""
     fig, ax = plt.subplots(figsize=(10, 7))
-    tx = true_df["true_x"].to_numpy(float)
-    ty = true_df["true_y"].to_numpy(float)
-    ax.plot(tx, ty, color="#333333", linewidth=3.5, label="True path", zorder=3)
+    if show_true_path:
+        tx = true_df["true_x"].to_numpy(float)
+        ty = true_df["true_y"].to_numpy(float)
+        ax.plot(tx, ty, color="#333333", linewidth=3.5, label="True path", zorder=3)
     ex = result.east_m
     ny = result.north_m
     ax.plot(ex, ny, color="#0066cc", linewidth=2.2, label="Estimated", zorder=4)

@@ -18,6 +18,12 @@ python -m path_estimation \
   --no-plots
 ```
 
+## Python API
+
+- **`evaluate_path_estimation(observations_csv, true_path_csv, road_graph, methods, ...)`** — metrics + optional plots; needs a real `*_true_path.csv`.
+- **`estimate_paths_only(observations_csv, road_graph, methods, ...)`** — returns `EstimationResult` per method; **no** truth file. Uses an internal time grid from the observation span (`output_hz`, default 1 Hz). Not available for **`lstm`**, **`transformer`**, or **`gnn`** (supervised / needs labels). **`plot_map`** is disallowed (needs real lon/lat).
+- **`stub_true_path_from_observations`** (`io.py`) — time-grid helper used internally for the no-truth path.
+
 ## CLI
 
 ```bash

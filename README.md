@@ -79,6 +79,8 @@ python -m path_estimation \
 
 **Outputs:** `metrics.json` (per method: RMSE, MAE, axis MAE, Hausdorff, discrete Fréchet, DTW, path lengths, length ratio, endpoint error, plus `meta`), and `figures/<method>_path_enu.png` (true vs estimated; optional observation overlays). No uncertainty ellipses are drawn on ENU plots.
 
+**Without a true path file**, use the Python API **`path_estimation.estimate_paths_only(observations_csv, road_graph, methods, ...)`**, which returns `EstimationResult` objects (no RMSE). Supervised methods (`lstm`, `transformer`, `gnn`) require **`evaluate_path_estimation`** with ground truth.
+
 ### Implemented methods (summary)
 
 | ID | Idea |

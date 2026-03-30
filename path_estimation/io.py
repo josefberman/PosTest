@@ -26,6 +26,42 @@ def load_true_path_csv(path: Path) -> pd.DataFrame:
     return df.sort_values("timestamp_s").reset_index(drop=True)
 
 
+def stub_true_path_from_observations(obs_df: pd.DataFrame, *, hz: float = 1.0) -> pd.DataFrame:
+    """Build a minimal ``true_path``-shaped frame for **output time grid only** (no real ground truth).
+
+    Timestamps span ``[min(observation time), max(observation time)]`` at ``hz`` Hz.
+    ``true_x`` / ``true_y`` are zero placeholders; most estimators only use the time axis.
+    Do **not** use this for metrics or for supervised methods (LSTM, Transformer, GNN).
+
+    Args:
+        obs_df: Sorted or unsorted observations (must contain ``timestamp_s``).
+        hz: Output sampling rate in Hz (default 1).
+
+    Returns:
+        DataFrame with ``timestamp_s``, ``true_x``, ``true_y``, and optional ``lon``/``lat`` (NaN).
+    """
+    obs_df = obs_df.sort_values("timestamp_s").reset_index(drop=True)
+    t = obs_df["timestamp_s"].to_numpy(dtype=float)
+    if len(t) == 0:
+        raise ValueError("No observations.")
+    t0, t1 = float(np.min(t)), float(np.max(t))
+    step = 1.0 / float(hz)
+    times = np.arange(t0, t1 + 1e-9, step)
+    n = len(times)
+    return pd.DataFrame(
+        {
+            "timestamp_s": times,
+            "true_x": np.zeros(n, dtype=float),
+            "true_y": np.zeros(n, dtype=float),
+            "lon": np.full(n, np.nan),
+            "lat": np.full(n, np.nan),
+            "reference_origin_lat": np.nan,
+            "reference_origin_lon": np.nan,
+            "dataset_id": "_stub_no_truth",
+        }
+    )
+
+
 def observation_enu_xy(row: pd.Series) -> Tuple[float, float]:
     """Return a single (east, north) proxy for an observation row (meters)."""
     src = row["source_type"]
